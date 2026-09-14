@@ -912,15 +912,19 @@ class RetrievalScoring(ApplicationModel):
     derived score) and a rank. This descriptor states, in the payload itself,
     which distance metric produced ``raw_distance``, which direction ranks
     better, how ``score`` is derived from the distance, and that neither value
-    is calibrated. It is returned identically across the CLI, HTTP, MCP,
-    stored job results, and evidence artifacts so the meaning never drifts
-    between surfaces. Calibrated, probability-like scores are deferred to the
-    end-to-end ranking evaluation tracked in issue #76.
+    is calibrated. Search results and video-query answers carry the same
+    descriptor, and evidence copied from a channel hit carries it too, so the
+    meaning never drifts between surfaces. Calibrated, probability-like scores are
+    deferred to the end-to-end ranking evaluation tracked in issue #76.
     """
 
-    distance_metric: Literal["l2", "cosine", "ip"] = Field(
-        default="l2",
-        description="Vector-store distance space that produced each raw_distance.",
+    distance_metric: Literal["l2", "cosine", "ip"] | None = Field(
+        default=None,
+        description=(
+            "Vector-store distance space that produced each raw_distance. Null "
+            "when the metric was not recorded, such as results saved before "
+            "this descriptor existed."
+        ),
     )
     raw_distance_direction: Literal[RankDirection.lower_is_better] = Field(
         default=RankDirection.lower_is_better,
@@ -981,8 +985,16 @@ class EvidenceBoardCandidate(ApplicationModel):
     score: float | None = Field(
         default=None,
         description=(
-            "Combined ordering-only fusion score copied from the source moment; "
-            "larger ranks better, not a probability."
+            "Ordering-only score copied from the evidence source, never a "
+            "probability; larger ranks better. score_semantics states whether "
+            "it is a fused moment score or one channel's hit score."
+        ),
+    )
+    score_semantics: "EvidenceScoreSemantics | None" = Field(
+        default=None,
+        description=(
+            "Source and meaning of score. Null when the evidence has no score "
+            "or its source was not recorded."
         ),
     )
     display_text: str | None = Field(default=None, max_length=512)
@@ -992,6 +1004,12 @@ class EvidenceBoardCandidate(ApplicationModel):
     def _valid_interval(self) -> "EvidenceBoardCandidate":
         if self.end < self.start:
             raise ValueError("Evidence board candidate end precedes its start.")
+        return self
+
+    @model_validator(mode="after")
+    def _score_semantics_describe_a_score(self) -> "EvidenceBoardCandidate":
+        if self.score is None and self.score_semantics is not None:
+            raise ValueError("Evidence score semantics require a score.")
         return self
 
 
@@ -1151,6 +1169,38 @@ class FusionProvenance(ApplicationModel):
             "moments within one response, never a probability or confidence."
         ),
     )
+
+
+class FusedMomentScoreSemantics(ApplicationModel):
+    """An evidence score copied from a fused moment's combined score."""
+
+    source: Literal["fused_moment"] = "fused_moment"
+    fusion: FusionProvenance = Field(
+        description=(
+            "Fusion that produced the score: reciprocal-rank fusion over the "
+            "searched channels, ordering-only and higher-is-better."
+        ),
+    )
+
+
+class ChannelHitScoreSemantics(ApplicationModel):
+    """An evidence score copied from one channel's search hit."""
+
+    source: Literal["channel_hit"] = "channel_hit"
+    scoring: RetrievalScoring = Field(
+        description=(
+            "Retrieval descriptor for the hit score: score = -raw_distance, with "
+            "raw_distance measured under scoring.distance_metric. Ordering-only; "
+            "compare it only with other hits from the same channel in the same "
+            "response."
+        ),
+    )
+
+
+EvidenceScoreSemantics = Annotated[
+    FusedMomentScoreSemantics | ChannelHitScoreSemantics,
+    Field(discriminator="source"),
+]
 
 
 class FusedMoment(ApplicationModel):
@@ -1385,8 +1435,16 @@ class EvidenceDeliveryItem(ApplicationModel):
     score: float | None = Field(
         default=None,
         description=(
-            "Combined ordering-only fusion score copied from the source moment; "
-            "larger ranks better, not a probability."
+            "Ordering-only score copied from the evidence source, never a "
+            "probability; larger ranks better. score_semantics states whether "
+            "it is a fused moment score or one channel's hit score."
+        ),
+    )
+    score_semantics: EvidenceScoreSemantics | None = Field(
+        default=None,
+        description=(
+            "Source and meaning of score. Null when the evidence has no score "
+            "or its source was not recorded."
         ),
     )
     provenance: dict[str, JsonValue] = Field(default_factory=dict)
@@ -1395,6 +1453,12 @@ class EvidenceDeliveryItem(ApplicationModel):
     keyframe: EvidenceKeyframe | None = None
     clip: EvidenceArtifact | None = None
     errors: tuple[ErrorDetail, ...] = ()
+
+    @model_validator(mode="after")
+    def _score_semantics_describe_a_score(self) -> "EvidenceDeliveryItem":
+        if self.score is None and self.score_semantics is not None:
+            raise ValueError("Evidence score semantics require a score.")
+        return self
 
 
 class EvidenceDeliveryResult(ApplicationModel):
@@ -1488,6 +1552,14 @@ class QueryAnswer(ApplicationModel):
     model: QueryModelIdentity | None = None
     claims: tuple[GroundedClaim, ...] = ()
     evidence: tuple[Evidence, ...] = Field(default=(), max_length=200)
+    scoring: RetrievalScoring = Field(
+        default_factory=RetrievalScoring,
+        description=(
+            "Meaning of the rank, score, and raw_distance on the hits in "
+            "evidence and moments, carried over from the fused search. The "
+            "combined moment score is described by fusion."
+        ),
+    )
     moments: tuple[FusedMoment, ...] = ()
     fusion: FusionProvenance
     evidence_delivery: EvidenceDeliveryResult | None = None

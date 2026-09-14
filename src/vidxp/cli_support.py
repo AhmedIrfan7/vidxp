@@ -152,7 +152,7 @@ def emit_search(
         caption=(
             "Rank 1 = best match. Score = reciprocal-rank fusion "
             "(higher ranks better); ordering-only, not a probability. "
-            f"Distance metric: {result.scoring.distance_metric}."
+            f"Distance metric: {result.scoring.distance_metric or 'not recorded'}."
         ),
     )
     table.add_column("Rank", justify="right")

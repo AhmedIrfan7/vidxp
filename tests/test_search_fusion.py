@@ -323,9 +323,40 @@ class SearchFusionTests(unittest.TestCase):
 
         restored = FusedSearchResult.model_validate(payload)
 
-        self.assertEqual(restored.scoring.distance_metric, "l2")
+        # The metric was never recorded, so it must stay unknown rather than
+        # silently becoming a definite metric.
+        self.assertIsNone(restored.scoring.distance_metric)
         self.assertEqual(restored.scoring.score_calibration, "ordering_only")
         self.assertEqual(restored.fusion.score_calibration, "ordering_only")
+
+    def test_fused_metric_is_unknown_unless_every_channel_agrees(self):
+        def channel(modality, metric):
+            return SearchResult(
+                query_id=f"{modality}:q",
+                query="taxi",
+                modality=modality,
+                scoring=RetrievalScoring(distance_metric=metric),
+                hits=(hit(modality, 1, 1, 2, f"{modality}:1"),),
+            )
+
+        def fused_metric(*results):
+            return fuse_search_results(
+                query="taxi",
+                requested_modalities=tuple(result.modality for result in results),
+                results=results,
+            ).scoring.distance_metric
+
+        self.assertEqual(
+            fused_metric(channel("scene", "cosine"), channel("speech", "cosine")),
+            "cosine",
+        )
+        self.assertIsNone(
+            fused_metric(channel("scene", "cosine"), channel("speech", None))
+        )
+        self.assertIsNone(
+            fused_metric(channel("scene", "cosine"), channel("speech", "ip"))
+        )
+        self.assertIsNone(fused_metric())
 
 
 if __name__ == "__main__":
